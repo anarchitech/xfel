@@ -28,10 +28,16 @@
 
 	.global _start
 _start:
+	mov r0, #0
+	mcr p15, 0, r0, c8, c7, 0
+	mcr p15, 0, r0, c7, c5, 0
+	mcr p15, 0, r0, c7, c5, 6
+	mcr p15, 0, r0, c7, c10, 4
+	mcr p15, 0, r0, c7, c5, 4
 	b reset
 
 reset:
-	ldr r0, =0x00037ff8
+	ldr r0, =0x00047fe0
 	str sp, [r0, #0]
 	str lr, [r0, #4]
 	mrs lr, cpsr
@@ -45,7 +51,7 @@ reset:
 
 	bl sys_jtag_init
 
-	ldr r0, =0x00037ff8
+	ldr r0, =0x00047fe0
 	ldr sp, [r0, #0]
 	ldr lr, [r0, #4]
 	ldr r1, [r0, #20]
@@ -57,4 +63,3 @@ reset:
 	ldr r1, [r0, #8]
 	msr cpsr, r1
 	bx lr
-
