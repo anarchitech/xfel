@@ -1,6 +1,9 @@
 #include <fel.h>
+#include <sha256.h>
+#include <ecdsa256.h>
 #include <spinor.h>
 #include <spinand.h>
+#include <libusb.h>
 
 static uint64_t file_save(const char * filename, void * buf, uint64_t len)
 {
@@ -52,6 +55,22 @@ static void * file_load(const char * filename, uint64_t * len)
 	return buf;
 }
 
+static inline unsigned char hex_to_bin(char c)
+{
+	if((c >= 'a') && (c <= 'f'))
+		return c - 'a' + 10;
+	if((c >= '0') && (c <= '9'))
+		return c - '0';
+	if((c >= 'A') && (c <= 'F'))
+		return c - 'A' + 10;
+	return 0;
+}
+
+static unsigned char hex_string(const char * s, int o)
+{
+	return (hex_to_bin(s[o]) << 4) | hex_to_bin(s[o + 1]);
+}
+
 static void hexdump(uint32_t addr, void * buf, size_t len)
 {
 	unsigned char * p = buf;
@@ -81,24 +100,27 @@ static void hexdump(uint32_t addr, void * buf, size_t len)
 
 static void usage(void)
 {
-	printf("xfel(v1.2.4-alpha) - https://github.com/xboot/xfel\r\n");
+	printf("xfel(v1.2.9) - https://github.com/xboot/xfel\r\n");
 	printf("usage:\r\n");
 	printf("    xfel version                                        - Show chip version\r\n");
 	printf("    xfel hexdump <address> <length>                     - Dumps memory region in hex\r\n");
 	printf("    xfel dump <address> <length>                        - Binary memory dump to stdout\r\n");
-	printf("    xfel exec <address>                                 - Call function address\r\n");
 	printf("    xfel read32 <address>                               - Read 32-bits value from device memory\r\n");
 	printf("    xfel write32 <address> <value>                      - Write 32-bits value to device memory\r\n");
 	printf("    xfel read <address> <length> <file>                 - Read memory to file\r\n");
 	printf("    xfel write <address> <file>                         - Write file to memory\r\n");
+	printf("    xfel exec <address>                                 - Call function address\r\n");
 	printf("    xfel reset                                          - Reset device using watchdog\r\n");
 	printf("    xfel sid                                            - Show sid information\r\n");
 	printf("    xfel jtag                                           - Enable jtag debug\r\n");
 	printf("    xfel ddr [type]                                     - Initial ddr controller with optional type\r\n");
+	printf("    xfel sign <public-key> <private-key> <file>         - Generate ecdsa256 signature file for sha256 of sid\r\n");
 	printf("    xfel spinor                                         - Detect spi nor flash\r\n");
+	printf("    xfel spinor erase <address> <length>                - Erase spi nor flash\r\n");
 	printf("    xfel spinor read <address> <length> <file>          - Read spi nor flash to file\r\n");
 	printf("    xfel spinor write <address> <file>                  - Write file to spi nor flash\r\n");
 	printf("    xfel spinand                                        - Detect spi nand flash\r\n");
+	printf("    xfel spinand erase <address> <length>               - Erase spi nand flash\r\n");
 	printf("    xfel spinand read <address> <length> <file>         - Read spi nand flash to file\r\n");
 	printf("    xfel spinand write <address> <file>                 - Write file to spi nand flash\r\n");
 	printf("    xfel spinand splwrite <split-size> <address> <file> - Write file to spi nand flash with split support\r\n");
@@ -107,6 +129,8 @@ static void usage(void)
 int main(int argc, char * argv[])
 {
 	struct xfel_ctx_t ctx;
+    libusb_context *context = NULL;
+
 
 	if(argc < 2)
 	{
@@ -122,8 +146,29 @@ int main(int argc, char * argv[])
 		}
 	}
 
-	libusb_init(NULL);
-	ctx.hdl = libusb_open_device_with_vid_pid(NULL, 0x1f3a, 0xefe8);
+	libusb_device **list = NULL;
+	libusb_init(&context);
+	int count = libusb_get_device_list(context, &list);
+	assert(count > 0);
+
+	for (size_t i = 0; i < count; ++i) {
+		libusb_device *device = list[i];
+		struct libusb_device_descriptor desc;
+		int rc = libusb_get_device_descriptor(device, &desc);
+		if(rc != 0)
+			{
+			printf("ERROR: Can't get device list: %d\r\n", rc);
+		}
+		if(desc.idVendor == 0x1f3a && desc.idProduct == 0xefe8) {
+			int rc = libusb_open(device, &ctx.hdl);
+			if(rc != 0)
+			{
+				printf("ERROR: Can't connect to device: %d\r\n", rc);
+			}
+			break;
+		}
+	}
+
 	if(!fel_init(&ctx))
 	{
 		printf("ERROR: Can't found any FEL device\r\n");
@@ -172,18 +217,6 @@ int main(int argc, char * argv[])
 				fwrite(buf, len, 1, stdout);
 				free(buf);
 			}
-		}
-		else
-			usage();
-	}
-	else if(!strcmp(argv[1], "exec"))
-	{
-		argc -= 2;
-		argv += 2;
-		if(argc == 1)
-		{
-			uint32_t addr = strtoul(argv[0], NULL, 0);
-			fel_exec(&ctx, addr);
 		}
 		else
 			usage();
@@ -250,6 +283,18 @@ int main(int argc, char * argv[])
 		else
 			usage();
 	}
+	else if(!strcmp(argv[1], "exec"))
+	{
+		argc -= 2;
+		argv += 2;
+		if(argc == 1)
+		{
+			uint32_t addr = strtoul(argv[0], NULL, 0);
+			fel_exec(&ctx, addr);
+		}
+		else
+			usage();
+	}
 	else if(!strcmp(argv[1], "reset"))
 	{
 		if(!fel_chip_reset(&ctx))
@@ -272,10 +317,80 @@ int main(int argc, char * argv[])
 	{
 		argc -= 2;
 		argv += 2;
-		if(fel_chip_ddr(&ctx, (argc == 1) ? argv[0] : NULL))
+		if(fel_chip_ddr(&ctx, (argc == 1) ? argv[0] : ""))
 			printf("Initial ddr controller succeeded\r\n");
 		else
 			printf("Failed to initial ddr controller\r\n");
+	}
+	else if(!strcmp(argv[1], "sign"))
+	{
+		argc -= 2;
+		argv += 2;
+		if(argc == 3)
+		{
+			uint8_t public_key[33] = {
+				0x03, 0xcf, 0xd1, 0x8e, 0x4a, 0x4b, 0x40, 0xd6,
+				0x52, 0x94, 0x48, 0xaa, 0x2d, 0xf8, 0xbb, 0xb6,
+				0x77, 0x12, 0x82, 0x58, 0xb8, 0xfb, 0xfc, 0x5b,
+				0x9e, 0x49, 0x2f, 0xbb, 0xba, 0x4e, 0x84, 0x83,
+				0x2f,
+			};
+			uint8_t private_key[32] = {
+				0xdc, 0x57, 0xb8, 0xa9, 0xe0, 0xe2, 0xb7, 0xf8,
+				0xb4, 0xc9, 0x29, 0xbd, 0x8d, 0xb2, 0x84, 0x4e,
+				0x53, 0xf0, 0x1f, 0x17, 0x1b, 0xbc, 0xdf, 0x6e,
+				0x62, 0x89, 0x08, 0xdb, 0xf2, 0xb2, 0xe6, 0xa9,
+			};
+			char * p = argv[0];
+			if(p && (strcmp(p, "") != 0) && (strlen(p) == sizeof(public_key) * 2))
+			{
+				for(int i = 0; i < sizeof(public_key); i++)
+					public_key[i] = hex_string(p, i * 2);
+			}
+			char * q = argv[1];
+			if(q && (strcmp(q, "") != 0) && (strlen(q) == sizeof(private_key) * 2))
+			{
+				for(int i = 0; i < sizeof(private_key); i++)
+					private_key[i] = hex_string(q, i * 2);
+			}
+			char sid[256];
+			uint8_t sha256[32];
+			uint8_t signature[64];
+			if(fel_chip_sid(&ctx, sid))
+			{
+				sha256_hash(sid, strlen(sid), sha256);
+				ecdsa256_sign(private_key, sha256, signature);
+				printf("Unique ID:\r\n\t");
+				printf("%s\r\n", sid);
+				printf("Sha256 digest:\r\n\t");
+				for(int i = 0; i < sizeof(sha256); i++)
+					printf("%02x", sha256[i]);
+				printf("\r\n");
+				printf("Ecdsa256 public key:\r\n\t");
+				for(int i = 0; i < sizeof(public_key); i++)
+					printf("%02x", public_key[i]);
+				printf("\r\n");
+				printf("Ecdsa256 private key:\r\n\t");
+				for(int i = 0; i < sizeof(private_key); i++)
+					printf("%02x", private_key[i]);
+				printf("\r\n");
+				printf("Ecdsa256 signature:\r\n\t");
+				for(int i = 0; i < sizeof(signature); i++)
+					printf("%02x", signature[i]);
+				printf("\r\n");
+				if(ecdsa256_verify(public_key, sha256, signature))
+				{
+					file_save(argv[2], signature, sizeof(signature));
+					printf("Ecdsa256 signature verify successed and saved to '%s'.\r\n", argv[2]);
+				}
+				else
+					printf("Ecdsa256 signature verify failed, please check the ecdsa256 public and private key.\r\n");
+			}
+			else
+				printf("The '%s' chip don't support sid command\r\n", ctx.chip->name);
+		}
+		else
+			usage();
 	}
 	else if(!strcmp(argv[1], "spinor"))
 	{
@@ -293,7 +408,16 @@ int main(int argc, char * argv[])
 		}
 		else
 		{
-			if(!strcmp(argv[0], "read") && (argc == 4))
+			if(!strcmp(argv[0], "erase") && (argc == 3))
+			{
+				argc -= 1;
+				argv += 1;
+				uint64_t addr = strtoull(argv[0], NULL, 0);
+				uint64_t len = strtoull(argv[1], NULL, 0);
+				if(!spinor_erase(&ctx, addr, len))
+					printf("Can't erase spi nor flash\r\n");
+			}
+			else if(!strcmp(argv[0], "read") && (argc == 4))
 			{
 				argc -= 1;
 				argv += 1;
@@ -343,7 +467,16 @@ int main(int argc, char * argv[])
 		}
 		else
 		{
-			if(!strcmp(argv[0], "read") && (argc == 4))
+			if(!strcmp(argv[0], "erase") && (argc == 3))
+			{
+				argc -= 1;
+				argv += 1;
+				uint64_t addr = strtoull(argv[0], NULL, 0);
+				uint64_t len = strtoull(argv[1], NULL, 0);
+				if(!spinand_erase(&ctx, addr, len))
+					printf("Can't erase spi nand flash\r\n");
+			}
+			else if(!strcmp(argv[0], "read") && (argc == 4))
 			{
 				argc -= 1;
 				argv += 1;

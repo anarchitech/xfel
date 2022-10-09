@@ -5,6 +5,10 @@
 extern "C" {
 #endif
 
+#ifdef __VSF__
+# undef _WIN32
+# define __linux__
+#endif
 #if (defined(_WIN16) || defined(_WIN32) || defined(_WIN64)) && !defined(__WINDOWS__)
 # define __WINDOWS__
 #endif
